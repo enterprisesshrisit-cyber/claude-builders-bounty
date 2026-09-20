@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 """Install the destructive-command guard without clobbering Claude settings."""
 import json
+import shutil
 import sys
 from pathlib import Path
 
+source_hook = Path(__file__).with_name("destructive_command_guard.py")
 claude_dir = Path.home() / ".claude"
+hook_dir = claude_dir / "hooks"
+hook_path = hook_dir / "destructive_command_guard.py"
 settings = claude_dir / "settings.json"
-hook_path = claude_dir / "hooks" / "destructive_command_guard.py"
 
-if not hook_path.is_file():
-    raise SystemExit(
-        f"Hook not found at {hook_path}. Run the README copy command first."
-    )
+if not source_hook.is_file():
+    raise SystemExit(f"Missing hook source: {source_hook}")
 
-settings.parent.mkdir(parents=True, exist_ok=True)
+hook_dir.mkdir(parents=True, exist_ok=True)
+shutil.copy2(source_hook, hook_path)
+
 try:
     data = json.loads(settings.read_text(encoding="utf-8")) if settings.exists() else {}
 except json.JSONDecodeError as exc:
@@ -45,4 +48,5 @@ if entry not in pre_tool_use:
     pre_tool_use.append(entry)
 
 settings.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-print(f"Installed PreToolUse hook in {settings}")
+print(f"Installed hook at {hook_path}")
+print(f"Updated Claude Code settings at {settings}")
