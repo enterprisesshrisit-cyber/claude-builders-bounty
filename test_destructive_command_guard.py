@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 MODULE = Path(__file__).with_name("destructive_command_guard.py")
+INSTALLER = Path(__file__).with_name("install_hook.py")
 spec = importlib.util.spec_from_file_location("guard", MODULE)
 guard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guard)
@@ -27,6 +28,9 @@ class GuardUnitTests(unittest.TestCase):
             "rm -r -f build",
             "sudo rm -R -f /tmp/demo",
             "/bin/rm --recursive --force dist",
+            "echo ok && rm -rf /tmp/demo",
+            "echo `rm -rf /tmp/demo`",
+            "if true; then rm -rf /tmp/demo; fi",
             "psql -c 'DROP TABLE users'",
             "sqlite3 app.db 'drop table sessions;'",
             "git push --force origin main",
@@ -36,6 +40,7 @@ class GuardUnitTests(unittest.TestCase):
             "mysql -e 'TRUNCATE sessions'",
             "DELETE FROM users;",
             "sqlite3 app.db 'delete from users'",
+            "echo 'DELETE FROM users' | psql",
         ]:
             with self.subTest(command=command):
                 self.assertBlocked(command)
@@ -49,14 +54,21 @@ class GuardUnitTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertAllowed(command)
 
-    def test_where_in_comment_does_not_bypass_delete_guard(self):
-        self.assertBlocked("DELETE FROM users /* WHERE id = 1 */;")
+    def test_where_in_comment_or_literal_does_not_bypass_guard(self):
+        for command in [
+            "DELETE FROM users /* WHERE id = 1 */;",
+            "DELETE FROM users RETURNING 'WHERE';",
+            'DELETE FROM users RETURNING "where";',
+        ]:
+            with self.subTest(command=command):
+                self.assertBlocked(command)
 
     def test_normal_bash_and_harmless_mentions_are_allowed(self):
         for command in [
             "rm file.txt",
             "rm -r directory",
             "rm -f file.txt",
+            "rm -- -rf",
             "git push origin main",
             "git status",
             "SELECT * FROM users",
@@ -138,6 +150,49 @@ class HookIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0)
             self.assertEqual(result.stdout, "")
+
+
+class InstallerIntegrationTests(unittest.TestCase):
+    def test_installer_is_one_command_preserves_settings_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            settings = home / ".claude" / "settings.json"
+            settings.parent.mkdir(parents=True)
+            settings.write_text(
+                json.dumps(
+                    {
+                        "permissions": {"allow": ["Bash(git status)"]},
+                        "hooks": {"PostToolUse": []},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env["HOME"] = str(home)
+
+            for _ in range(2):
+                result = subprocess.run(
+                    [sys.executable, str(INSTALLER)],
+                    text=True,
+                    capture_output=True,
+                    env=env,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+            data = json.loads(settings.read_text(encoding="utf-8"))
+            self.assertEqual(
+                data["permissions"]["allow"],
+                ["Bash(git status)"],
+            )
+            self.assertEqual(data["hooks"]["PostToolUse"], [])
+            self.assertEqual(len(data["hooks"]["PreToolUse"]), 1)
+
+            installed_hook = home / ".claude" / "hooks" / MODULE.name
+            self.assertEqual(
+                installed_hook.read_text(encoding="utf-8"),
+                MODULE.read_text(encoding="utf-8"),
+            )
 
 
 if __name__ == "__main__":
