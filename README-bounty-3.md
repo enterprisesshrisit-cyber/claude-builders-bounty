@@ -7,33 +7,36 @@ unchanged.
 
 ## What it blocks
 
-- recursive + forced `rm`, including combined/separate flags and `sudo`
+- recursive + forced `rm`, including combined/separate flags, paths, shell
+  chaining, command substitution, and `sudo`
 - `DROP TABLE`
 - `git push --force`, `--force-with-lease`, and `-f`
 - `TRUNCATE`
-- `DELETE FROM` without a `WHERE` clause
+- `DELETE FROM` without a real `WHERE` clause
 
 For SQL, the guard recognizes raw destructive SQL and common database CLIs
 (`psql`, `mysql`, `mariadb`, `sqlite3`, `duckdb`) while allowing harmless
-text such as `echo 'DROP TABLE users'`.
+text such as `echo 'DROP TABLE users'`. SQL comments or quoted text containing
+the word `WHERE` do not bypass the `DELETE FROM` guard.
 
 Every blocked attempt is appended to
 `~/.claude/hooks/blocked.log` with an ISO-8601 UTC timestamp, project path,
 and attempted command.
 
-## Install — 2 commands
+## Install — 1 command
 
-Run these from this repository:
+Run this from this repository:
 
 ```bash
-mkdir -p ~/.claude/hooks && cp destructive_command_guard.py ~/.claude/hooks/
 python3 install_hook.py
 ```
 
-The installer preserves unrelated settings and existing hooks in
-`~/.claude/settings.json`. It registers the script as a `PreToolUse` hook
-with matcher `Bash` using Claude Code's command + args format. Restart Claude
-Code after installation.
+The installer copies the hook into `~/.claude/hooks/`, preserves unrelated
+settings and existing hooks in `~/.claude/settings.json`, and registers the
+script as a `PreToolUse` hook with matcher `Bash` using Claude Code's
+command + args format. Running the installer again is idempotent.
+
+Restart Claude Code after installation.
 
 ## Test
 
@@ -41,8 +44,9 @@ Code after installation.
 python3 -m unittest -v test_destructive_command_guard.py
 ```
 
-The tests cover required patterns, common bypass variants, harmless commands,
-the structured `deny` response, and the required block log fields.
+The suite covers the required patterns, common shell bypass variants, harmless
+commands, structured deny output, required log fields, and installer
+idempotency/settings preservation.
 
 ## Hook behavior
 
