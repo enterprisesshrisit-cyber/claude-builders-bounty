@@ -11,18 +11,19 @@ from pathlib import Path
 
 LOG_PATH = Path.home() / ".claude" / "hooks" / "blocked.log"
 
+SHELL_BOUNDARY = r"(?:^|[;&|()`{}\n]\s*|\b(?:then|do|else)\s+)"
 RM_COMMAND_RE = re.compile(
-    r"(?ix)(?:^|[;&|()]\s*)"
+    rf"(?ix){SHELL_BOUNDARY}"
     r"(?:(?:sudo|command)\s+)*"
     r"(?:\S*/)?rm\b(?P<args>[^\n;&|]*)"
 )
 GIT_PUSH_RE = re.compile(
-    r"(?ix)(?:^|[;&|()]\s*)"
+    rf"(?ix){SHELL_BOUNDARY}"
     r"(?:(?:sudo|command)\s+)*"
     r"(?:\S*/)?git\s+push\b(?P<args>[^\n;&|]*)"
 )
 DB_CLIENT_RE = re.compile(
-    r"(?ix)(?:^|[;&|()]\s*)"
+    rf"(?ix){SHELL_BOUNDARY}"
     r"(?:(?:sudo|command)\s+)*"
     r"(?:\S*/)?(?:psql|mysql|mariadb|sqlite3|duckdb)\b"
 )
@@ -36,6 +37,7 @@ DELETE_RE = re.compile(
 )
 WHERE_RE = re.compile(r"(?i)\bwhere\b")
 SQL_COMMENT_RE = re.compile(r"/\*.*?\*/|--[^\r\n]*", re.S | re.M)
+SQL_QUOTED_RE = re.compile(r'''(?:'(?:''|[^'])*'|"(?:""|[^"])*")''', re.S)
 
 
 def _option_tokens(args: str) -> list[str]:
@@ -78,14 +80,14 @@ def _has_forced_git_push(command: str) -> bool:
 
 
 def _is_sql_context(command: str) -> bool:
-    # Raw SQL at the start is blocked, as is destructive SQL passed to a
-    # common database CLI. Harmless mentions such as echo "DROP TABLE ..."
-    # remain normal Bash commands.
+    # Raw destructive SQL at the start is blocked, as is destructive SQL sent
+    # to a common database CLI. Harmless text mentions remain normal Bash.
     return bool(SQL_START_RE.search(command) or DB_CLIENT_RE.search(command))
 
 
-def _strip_sql_comments(text: str) -> str:
-    return SQL_COMMENT_RE.sub(" ", text)
+def _sql_code_only(text: str) -> str:
+    without_comments = SQL_COMMENT_RE.sub(" ", text)
+    return SQL_QUOTED_RE.sub(" ", without_comments)
 
 
 def reason_for(command: str) -> str | None:
@@ -101,8 +103,7 @@ def reason_for(command: str) -> str | None:
         if TRUNCATE_RE.search(command):
             return "TRUNCATE"
         for match in DELETE_RE.finditer(command):
-            body = _strip_sql_comments(match.group("body"))
-            if not WHERE_RE.search(body):
+            if not WHERE_RE.search(_sql_code_only(match.group("body"))):
                 return "DELETE FROM without a WHERE clause"
 
     return None
@@ -113,8 +114,15 @@ def log_block(command: str, cwd: str) -> None:
     stamp = datetime.now(timezone.utc).isoformat()
     safe_command = command.replace("\n", "\\n").replace("\r", "\\r")
     safe_cwd = cwd.replace("\n", "\\n").replace("\r", "\\r")
-    with LOG_PATH.open("a", encoding="utf-8") as fh:
-        fh.write(f"{stamp}\t{safe_cwd}\t{safe_command}\n")
+    line = f"{stamp}\t{safe_cwd}\t{safe_command}\n".encode("utf-8")
+
+    # A single append write reduces interleaving if multiple Claude sessions
+    # block commands at the same time.
+    fd = os.open(LOG_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(fd, line)
+    finally:
+        os.close(fd)
 
 
 def main() -> int:
